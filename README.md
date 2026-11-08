@@ -6,7 +6,7 @@ A minimal native Android photo and video compressor. Set a maximum file size, ad
 
 ## Install
 
-Download **Compress-1.1.apk** from the [latest release](https://github.com/JackB-4/compress/releases/latest), open it on Android, and allow installation from that source. Install over the previous Compress APK to keep settings. Package: `com.jack.compress`; versionName: `1.1`; versionCode: `2`.
+Download **Compress-1.2.apk** from the [latest release](https://github.com/JackB-4/compress/releases/latest), open it on Android, and allow installation from that source. Install over the previous Compress APK to keep settings. Package: `com.jack.compress`; versionName: `1.2`; versionCode: `3`.
 
 ## Obtainium
 
@@ -22,10 +22,11 @@ Use the normal GitHub stable-release defaults. Releases contain one universal AP
 
 ## Features
 
-- Maximum size per file in decimal MB, with 5/10/25/50 MB presets.
+- Maximum size per file in decimal MB, with 5/10/20/50 MB presets. Video/mixed queues default to 20 MB; photo-only queues default to 10 MB. Each remembers its own custom limit. The previous 10 MB video default migrates to 20 MB.
 - Media picker, Android share-sheet input, URI drag/drop, and sequential queues.
-- Native Media3 video encoding to H.264 or HEVC/AAC MP4. Bitrate and resolution follow the size budget; oversized results are retried with lower settings.
+- Native Media3 video encoding to H.264, HEVC, or AV1 video with AAC audio in MP4. Bitrate and resolution follow the size budget; oversized results are retried with lower settings.
 - JPEG/WebP photo quality search, followed by dimension reduction when required.
+- Fast/Balanced/Best effort controls and an estimated time range directly below the size controls.
 - Files already below the limit can be copied without re-encoding.
 - Dark, light, and system themes; compact tiles and dial details inspired by [Meridian](https://github.com/JackB-4/meridian).
 - Frame-paced progress dial, converging arrows, smooth progress easing, completion checkmark, and screen transitions. Animations respect Android's system animation setting and stop when inactive.
@@ -37,7 +38,17 @@ Outputs are published through MediaStore to `Pictures/Compress` and `Movies/Comp
 
 ## Settings
 
-Theme, video codec, maximum video height, audio bitrate, audio removal, photo format, maximum photo edge, photo quality ceiling, and copying already-small files. Compression settings are intended to be changed between jobs.
+Select **AV1** under Settings → Video codec. AV1 requires Android 14 or newer and an exposed native AV1 encoder. Hardware encoders are preferred; software is used when that is the only native option. Unsupported devices report an error. Codec selection is preserved rather than silently substituting H.264.
+
+Theme, video codec, maximum video height, audio bitrate, audio removal, photo format, maximum photo edge, photo quality ceiling, and copying already-small files are configurable. Job options are snapshotted at start.
+
+Effort controls change the processing strategy; they are not vendor-specific CPU-speed presets:
+
+- **Fast:** up to 720p (or the lower configured limit), coarser photo quality search, one video corrective retry.
+- **Balanced:** configured video ceiling, finer photo search, up to three corrective retries.
+- **Best:** configured video ceiling, full photo search, up to five corrective retries, plus an extra video refinement pass when the first result leaves substantial unused size budget. A valid first result is retained if refinement fails.
+
+Time estimates use media duration, planned resolution, codec and hardware availability. Initial factors are broad heuristics, not Pixel benchmarks. Estimates adapt from successful video jobs on the device, normalized by frame count and resolution. Thermal throttling, content complexity, retries and storage speed can change actual time. Photo estimates are approximate. Selecting a different effort updates the range. No estimate is shown until media is available.
 
 ## Privacy and limits
 

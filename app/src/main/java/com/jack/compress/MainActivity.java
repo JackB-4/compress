@@ -6,22 +6,40 @@ import android.content.*;
 import android.content.res.*;
 import android.graphics.*;
 import android.graphics.drawable.*;
+import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.*;
+import android.text.*;
 import android.view.*;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 import java.util.*;
+import java.util.concurrent.*;
 
 @androidx.media3.common.util.UnstableApi
 public class MainActivity extends Activity {
   final ArrayList<Uri> files = new ArrayList<>();
   LinearLayout page, list, root;
   EditText target;
-  TextView state, percentage;
+  TextView state, percentage, estimate;
+  String targetKey = "videoTarget";
+  final ArrayList<Button> effortButtons = new ArrayList<>();
+  final Map<Uri, MediaDetails> media = new HashMap<>();
+  final ExecutorService metadata = Executors.newSingleThreadExecutor();
+  int probeGeneration;
+  boolean metadataComplete;
+
+  static final class MediaDetails {
+    boolean video;
+    long bytes;
+    double duration;
+    int width = 1920, height = 1080;
+    float fps = 30;
+  }
+
   Button run, cancel;
   ProgressDial dial;
-  boolean settingsOpen;
+  boolean settingsOpen, wasBusy;
   int bg, ink, muted, surface, border;
   android.content.SharedPreferences prefs;
   final Handler handler = new Handler(Looper.getMainLooper());
@@ -41,6 +59,14 @@ public class MainActivity extends Activity {
   public void onCreate(Bundle saved) {
     super.onCreate(saved);
     prefs = getSharedPreferences("settings", 0);
+    if (!prefs.contains("videoTarget")) {
+      String legacy = prefs.getString("target", "10");
+      prefs
+          .edit()
+          .putString("videoTarget", legacy.equals("10") ? "20" : legacy)
+          .putString("photoTarget", legacy)
+          .apply();
+    }
     if (saved != null) {
       ArrayList<String> stored = saved.getStringArrayList("files");
       if (stored != null) for (String u : stored) files.add(Uri.parse(u));
@@ -79,6 +105,12 @@ public class MainActivity extends Activity {
     b.putStringArrayList("files", s);
     b.putBoolean("settings", settingsOpen);
     super.onSaveInstanceState(b);
+  }
+
+  @Override
+  protected void onDestroy() {
+    metadata.shutdownNow();
+    super.onDestroy();
   }
 
   @Override
@@ -250,7 +282,8 @@ public class MainActivity extends Activity {
     size.setGravity(Gravity.BOTTOM);
     target = new EditText(this);
     target.setSingleLine();
-    target.setText(prefs.getString("target", "10"));
+    targetKey = targetKeyForQueue();
+    target.setText(prefs.getString(targetKey, targetKey.equals("videoTarget") ? "20" : "10"));
     target.setTextSize(52);
     target.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
     target.setTextColor(ink);
@@ -265,13 +298,49 @@ public class MainActivity extends Activity {
     size.addView(unit);
     page.addView(size);
     LinearLayout presets = new LinearLayout(this);
-    for (String n : new String[] {"5", "10", "25", "50"}) {
+    for (String n : new String[] {"5", "10", "20", "50"}) {
       Button b = makeButton(n + " MB", () -> target.setText(n), false);
       LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1);
       if (presets.getChildCount() > 0) lp.leftMargin = dp(4);
       presets.addView(b, lp);
     }
     page.addView(presets);
+    space(16);
+    page.addView(text("EFFORT", 11, muted));
+    space(8);
+    effortButtons.clear();
+    LinearLayout efforts = new LinearLayout(this);
+    for (String level : CompressionOptions.EFFORTS) {
+      Button b =
+          makeButton(
+              level,
+              () -> {
+                if (CompressionService.busy) return;
+                prefs.edit().putString("effort", level).apply();
+                updateEffort();
+                updateEstimate();
+              },
+              false);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1);
+      if (!effortButtons.isEmpty()) lp.leftMargin = dp(4);
+      efforts.addView(b, lp);
+      effortButtons.add(b);
+    }
+    page.addView(efforts);
+    estimate = text("Add media for time estimate", 12, muted);
+    estimate.setPadding(0, dp(10), 0, 0);
+    page.addView(estimate);
+    updateEffort();
+    target.addTextChangedListener(
+        new TextWatcher() {
+          public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+          public void onTextChanged(CharSequence s, int start, int before, int count) {
+            updateEstimate();
+          }
+
+          public void afterTextChanged(Editable e) {}
+        });
     line();
     button(
         "Add photos or videos",
@@ -315,11 +384,14 @@ public class MainActivity extends Activity {
   void render() {
     if (settingsOpen || state == null) return;
     boolean busy = CompressionService.busy;
+    if (wasBusy && !busy) updateEstimate();
+    wasBusy = busy;
     String status = CompressionService.status;
     if (!state.getText().toString().equals(status)) state.setText(status);
     run.setEnabled(!busy && !files.isEmpty());
     run.setAlpha(run.isEnabled() ? 1 : .35f);
     target.setEnabled(!busy);
+    for (Button b : effortButtons) b.setEnabled(!busy);
     cancel.setVisibility(busy ? View.VISIBLE : View.GONE);
     float p = CompressionService.progress;
     percentage.setText(
@@ -331,11 +403,18 @@ public class MainActivity extends Activity {
 
   void persistTarget() {
     if (target != null && !settingsOpen)
-      prefs.edit().putString("target", target.getText().toString()).apply();
+      prefs.edit().putString(targetKey, target.getText().toString()).apply();
   }
 
   void showFiles() {
     if (list == null || settingsOpen) return;
+    String key = targetKeyForQueue();
+    if (target != null && !targetKey.equals(key)) {
+      persistTarget();
+      targetKey = key;
+      target.setText(prefs.getString(key, key.equals("videoTarget") ? "20" : "10"));
+    }
+    probeMedia();
     list.removeAllViews();
     for (Uri u : files) {
       TextView t = text(name(u) + "   ×", 13, ink);
@@ -448,6 +527,167 @@ public class MainActivity extends Activity {
     else super.onBackPressed();
   }
 
+  String targetKeyForQueue() {
+    if (files.isEmpty()) return "videoTarget";
+    for (Uri u : files) {
+      String type;
+      try {
+        type = getContentResolver().getType(u);
+      } catch (RuntimeException ignored) {
+        type = null;
+      }
+      if (type == null || type.startsWith("video/")) return "videoTarget";
+    }
+    return "photoTarget";
+  }
+
+  void updateEffort() {
+    String effort = prefs.getString("effort", "Balanced");
+    for (int i = 0; i < effortButtons.size(); i++) {
+      Button b = effortButtons.get(i);
+      boolean selected = CompressionOptions.EFFORTS[i].equals(effort);
+      b.setSelected(selected);
+      b.setTextColor(selected ? bg : ink);
+      b.setBackground(
+          new RippleDrawable(
+              ColorStateList.valueOf(border), round(selected ? ink : surface, 6), null));
+    }
+  }
+
+  void probeMedia() {
+    metadataComplete = false;
+    int generation = ++probeGeneration;
+    ArrayList<Uri> snapshot = new ArrayList<>(files);
+    updateEstimate();
+    metadata.execute(
+        () -> {
+          Map<Uri, MediaDetails> found = new HashMap<>();
+          for (Uri uri : snapshot) {
+            MediaDetails d = new MediaDetails();
+            try {
+              String type = getContentResolver().getType(uri);
+              d.video = type != null && type.startsWith("video/");
+              try (android.os.ParcelFileDescriptor fd =
+                  getContentResolver().openFileDescriptor(uri, "r")) {
+                if (fd != null) d.bytes = fd.getStatSize();
+              }
+              if (d.video) {
+                MediaMetadataRetriever r = new MediaMetadataRetriever();
+                try {
+                  r.setDataSource(this, uri);
+                  d.duration =
+                      Double.parseDouble(
+                              r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION))
+                          / 1000;
+                  d.width =
+                      Integer.parseInt(
+                          r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH));
+                  d.height =
+                      Integer.parseInt(
+                          r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT));
+                  String rotation =
+                      r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION);
+                  if ("90".equals(rotation) || "270".equals(rotation)) {
+                    int tmp = d.width;
+                    d.width = d.height;
+                    d.height = tmp;
+                  }
+                  String fps =
+                      r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE);
+                  if (fps != null) d.fps = Float.parseFloat(fps);
+                } finally {
+                  r.release();
+                }
+              }
+              found.put(uri, d);
+            } catch (Exception ignored) {
+            }
+          }
+          handler.post(
+              () -> {
+                if (!isDestroyed() && generation == probeGeneration) {
+                  media.clear();
+                  media.putAll(found);
+                  metadataComplete = true;
+                  updateEstimate();
+                }
+              });
+        });
+  }
+
+  void updateEstimate() {
+    if (settingsOpen || estimate == null) return;
+    if (files.isEmpty()) {
+      estimate.setText("Add media for time estimate");
+      return;
+    }
+    if (!metadataComplete) {
+      estimate.setText("Estimating…");
+      return;
+    }
+    try {
+      double mb = Double.parseDouble(target.getText().toString());
+      if (!Double.isFinite(mb) || mb < .01 || mb > 100000) throw new NumberFormatException();
+      long cap = (long) (mb * 1000000);
+      if (cap <= 0) throw new NumberFormatException();
+      String effort = prefs.getString("effort", "Balanced"),
+          codec = prefs.getString("codec", "H.264");
+      double total = 0;
+      boolean learned = prefs.contains(CompressionOptions.timingKey(codec, effort));
+      for (Uri uri : files) {
+        MediaDetails d = media.get(uri);
+        if (d == null || d.video && d.duration <= 0) {
+          estimate.setText("Time estimate unavailable");
+          return;
+        }
+        if (prefs.getBoolean("copy", true) && d.bytes > 0 && d.bytes <= cap) {
+          total += Math.max(1, d.bytes / 100000000.0);
+          continue;
+        }
+        if (!d.video) {
+          total += effort.equals("Fast") ? 1 : effort.equals("Best") ? 4 : 2;
+          continue;
+        }
+        if (!CompressionOptions.encoderAvailable(codec)) {
+          estimate.setText(codec + " encoding unavailable");
+          return;
+        }
+        int audio =
+            prefs.getBoolean("mute", false)
+                ? 0
+                : Integer.parseInt(prefs.getString("audio", "96")) * 1000;
+        long budget = (long) (cap * 8 * .94 / d.duration) - audio;
+        if (budget < 32000) {
+          estimate.setText("Target too small for video");
+          return;
+        }
+        int h =
+            CompressionOptions.height(
+                d.height, Integer.parseInt(prefs.getString("height", "1080")), budget, effort);
+        int w = Math.max(2, (int) (d.width * (double) h / d.height));
+        double factor =
+            CompressionOptions.hardware(codec)
+                ? (codec.equals("AV1") ? 1.2 : codec.equals("HEVC") ? .8 : .6)
+                : (codec.equals("AV1") ? 20 : codec.equals("HEVC") ? 10 : 4);
+        if (effort.equals("Best")) factor *= 1.8;
+        factor = prefs.getFloat(CompressionOptions.timingKey(codec, effort), (float) factor);
+        total += Math.max(2, CompressionOptions.work(d.duration, w, h, d.fps) * factor) + 1;
+      }
+      long low = Math.max(1, (long) (total * .5)),
+          high = Math.max(low + 1, (long) Math.ceil(total * 2));
+      estimate.setText(
+          "Estimated " + time(low) + "–" + time(high) + (learned ? "" : " · approximate"));
+    } catch (NumberFormatException e) {
+      estimate.setText("Enter a valid file size");
+    }
+  }
+
+  static String time(long seconds) {
+    return seconds < 60
+        ? seconds + " s"
+        : String.format(java.util.Locale.US, "%d:%02d", seconds / 60, seconds % 60);
+  }
+
   void settings() {
     settingsOpen = true;
     target = null;
@@ -456,7 +696,7 @@ public class MainActivity extends Activity {
     base("Settings");
     choice("Theme", "theme", new String[] {"Dark", "Light", "System"}, "Dark");
     line();
-    choice("Video codec", "codec", new String[] {"H.264", "HEVC"}, "H.264");
+    choice("Video codec", "codec", new String[] {"H.264", "HEVC", "AV1"}, "H.264");
     choice(
         "Maximum video height",
         "height",

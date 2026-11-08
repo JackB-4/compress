@@ -24,7 +24,33 @@ public class CompressionService extends Service {
   final Handler main = new Handler(Looper.getMainLooper());
   volatile boolean cancelled;
   Transformer transformer;
-  android.content.SharedPreferences config;
+  Map<String, ?> options;
+  String effort, codec;
+  long videoStarted;
+  double videoWork;
+  File bestVideo;
+
+  String option(String key, String fallback) {
+    Object v = options.get(key);
+    return v instanceof String ? (String) v : fallback;
+  }
+
+  boolean option(String key, boolean fallback) {
+    Object v = options.get(key);
+    return v instanceof Boolean ? (Boolean) v : fallback;
+  }
+
+  void rememberTiming() {
+    if (videoWork > 0) {
+      double ratio = (SystemClock.elapsedRealtime() - videoStarted) / 1000.0 / videoWork;
+      String key = CompressionOptions.timingKey(codec, effort);
+      android.content.SharedPreferences prefs = getSharedPreferences("settings", 0);
+      float previous = prefs.getFloat(key, (float) ratio);
+      prefs.edit().putFloat(key, (float) (previous * .65 + ratio * .35)).apply();
+      videoWork = 0;
+    }
+  }
+
   ArrayList<Uri> queue;
   int index = 0, success = 0;
   long limit;
@@ -47,9 +73,11 @@ public class CompressionService extends Service {
     cancelled = false;
     saved = 0;
     progress = -1;
-    config = getSharedPreferences("settings", 0);
+    options = new HashMap<>(getSharedPreferences("settings", 0).getAll());
+    effort = option("effort", "Balanced");
+    codec = option("codec", "H.264");
     queue = i.getParcelableArrayListExtra("files");
-    limit = i.getLongExtra("limit", 10000000);
+    limit = i.getLongExtra("limit", 20000000);
     NotificationManager nm = getSystemService(NotificationManager.class);
     nm.createNotificationChannel(
         new NotificationChannel("compression", "Compression", NotificationManager.IMPORTANCE_LOW));
@@ -76,6 +104,8 @@ public class CompressionService extends Service {
       return;
     }
     progress = -1;
+    videoWork = 0;
+    bestVideo = null;
     Uri u = queue.get(index);
     status = (index + 1) + " / " + queue.size() + " · Compressing";
     worker.execute(
@@ -83,7 +113,7 @@ public class CompressionService extends Service {
           try {
             String mime = getContentResolver().getType(u);
             if (mime == null) throw new IOException("Unknown media format");
-            if (config.getBoolean("copy", true)) {
+            if (option("copy", true)) {
               try (android.os.ParcelFileDescriptor d =
                   getContentResolver().openFileDescriptor(u, "r")) {
                 if (d != null && d.getStatSize() > 0 && d.getStatSize() <= limit) {
@@ -118,6 +148,11 @@ public class CompressionService extends Service {
 
   void complete() {
     if (cancelled) return;
+    rememberTiming();
+    if (bestVideo != null) {
+      bestVideo.delete();
+      bestVideo = null;
+    }
     success++;
     saved = success;
     index++;
@@ -128,6 +163,22 @@ public class CompressionService extends Service {
   void failed(Exception e) {
     if (cancelled) {
       if (current != null) current.delete();
+      return;
+    }
+    if (bestVideo != null) {
+      File fallback = bestVideo;
+      bestVideo = null;
+      worker.execute(
+          () -> {
+            try {
+              save(fallback, "video/mp4");
+              fallback.delete();
+              complete();
+            } catch (Exception failure) {
+              fallback.delete();
+              failed(failure);
+            }
+          });
       return;
     }
     errors
@@ -143,7 +194,7 @@ public class CompressionService extends Service {
 
   void photo(Uri uri) throws Exception {
     progress = -1;
-    int max = Integer.parseInt(config.getString("edge", "4096"));
+    int max = Integer.parseInt(option("edge", "4096"));
     ImageDecoder.Source source = ImageDecoder.createSource(getContentResolver(), uri);
     Bitmap bitmap =
         ImageDecoder.decodeBitmap(
@@ -155,7 +206,7 @@ public class CompressionService extends Service {
               decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
               decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB));
             });
-    boolean webp = config.getString("photo", "JPEG").equals("WebP");
+    boolean webp = option("photo", "JPEG").equals("WebP");
     Bitmap.CompressFormat format = webp ? Bitmap.CompressFormat.WEBP : Bitmap.CompressFormat.JPEG;
     if (!webp && bitmap.hasAlpha()) {
       Bitmap flat =
@@ -169,16 +220,21 @@ public class CompressionService extends Service {
     File out = File.createTempFile("photo", webp ? ".webp" : ".jpg", getCacheDir());
     current = out;
     try {
-      int ceiling = Integer.parseInt(config.getString("quality", "95"));
+      int ceiling = Integer.parseInt(option("quality", "95"));
       for (int pass = 0; pass < 20 && !cancelled; pass++) {
         int lo = 35, hi = ceiling, best = -1;
-        while (lo <= hi) {
+        int steps = 0;
+        while (lo <= hi && steps++ < CompressionOptions.photoSteps(effort)) {
           int q = (lo + hi) / 2;
           encode(bitmap, format, q, out);
           if (out.length() <= limit) {
             best = q;
             lo = q + 1;
           } else hi = q - 1;
+        }
+        if (best < 0) {
+          encode(bitmap, format, 35, out);
+          if (out.length() <= limit) best = 35;
         }
         if (best >= 0) {
           encode(bitmap, format, best, out);
@@ -210,9 +266,14 @@ public class CompressionService extends Service {
   }
 
   void video(Uri uri) throws Exception {
+    if (!CompressionOptions.encoderAvailable(codec))
+      throw new IOException(
+          codec + " encoding unavailable" + (codec.equals("AV1") ? " (requires Android 14+)" : ""));
+    videoStarted = SystemClock.elapsedRealtime();
     MediaMetadataRetriever r = new MediaMetadataRetriever();
     double seconds;
-    int height;
+    int height, width;
+    float fps = 30;
     try {
       r.setDataSource(this, uri);
       seconds =
@@ -221,18 +282,21 @@ public class CompressionService extends Service {
       int h = Integer.parseInt(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT));
       String rotation = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION);
       height = ("90".equals(rotation) || "270".equals(rotation)) ? w : h;
+      width = ("90".equals(rotation) || "270".equals(rotation)) ? h : w;
+      String rate = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE);
+      if (rate != null) fps = Float.parseFloat(rate);
     } finally {
       r.release();
     }
     if (seconds <= 0) throw new IOException("Invalid duration");
-    int audio =
-        config.getBoolean("mute", false)
-            ? 0
-            : Integer.parseInt(config.getString("audio", "96")) * 1000;
+    int audio = option("mute", false) ? 0 : Integer.parseInt(option("audio", "96")) * 1000;
     long budget = (long) (limit * 8 * .94 / seconds) - audio;
     if (budget < 32000) throw new IOException("Target too small; remove audio or raise limit");
-    int h = Math.min(height, Integer.parseInt(config.getString("height", "1080")));
-    h = Math.min(h, Math.max(144, (int) Math.sqrt(budget / 4.5)));
+    int h =
+        CompressionOptions.height(
+            height, Integer.parseInt(option("height", "1080")), budget, effort);
+    videoWork =
+        CompressionOptions.work(seconds, Math.max(2, (int) (width * (double) h / height)), h, fps);
     attempt(uri, (int) Math.min(budget, 80000000), audio, h, 0);
   }
 
@@ -246,6 +310,11 @@ public class CompressionService extends Service {
           try {
             DefaultEncoderFactory factory =
                 new DefaultEncoderFactory.Builder(this)
+                    .setVideoEncoderSelector(
+                        type ->
+                            type.equals(CompressionOptions.mime(codec))
+                                ? EncoderSelector.DEFAULT.selectEncoderInfos(type)
+                                : com.google.common.collect.ImmutableList.of())
                     .setRequestedVideoEncoderSettings(
                         new VideoEncoderSettings.Builder().setBitrate(bitrate).build())
                     .setRequestedAudioEncoderSettings(
@@ -265,10 +334,7 @@ public class CompressionService extends Service {
             transformer =
                 new Transformer.Builder(this)
                     .setEncoderFactory(factory)
-                    .setVideoMimeType(
-                        config.getString("codec", "H.264").equals("HEVC")
-                            ? MimeTypes.VIDEO_H265
-                            : MimeTypes.VIDEO_H264)
+                    .setVideoMimeType(CompressionOptions.mime(codec))
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
                     .addListener(
                         new Transformer.Listener() {
@@ -293,7 +359,7 @@ public class CompressionService extends Service {
                                               + " bps, height "
                                               + height);
                                       out.delete();
-                                      if (pass >= 3)
+                                      if (pass >= CompressionOptions.retries(effort))
                                         throw new IOException("Target not reached; raise limit");
                                       int next = (int) (bitrate * (double) limit / size * .88);
                                       if (next < 32000) throw new IOException("Target too small");
@@ -306,6 +372,23 @@ public class CompressionService extends Service {
                                           Math.max(144, (int) (height * .75)),
                                           pass + 1);
                                     } else {
+                                      if (effort.equals("Best")
+                                          && pass == 0
+                                          && out.length() > 0
+                                          && out.length() < limit * .9) {
+                                        bestVideo = out;
+                                        int refined =
+                                            (int)
+                                                Math.min(
+                                                    80000000,
+                                                    bitrate * (double) limit / out.length() * .97);
+                                        if (refined > bitrate * 1.05) {
+                                          status =
+                                              (index + 1) + " / " + queue.size() + " · Refining";
+                                          attempt(uri, refined, audio, height, pass + 1);
+                                          return;
+                                        }
+                                      }
                                       save(out, "video/mp4");
                                       complete();
                                     }
@@ -398,6 +481,7 @@ public class CompressionService extends Service {
     if (transformer != null) transformer.cancel();
     worker.shutdownNow();
     if (current != null) current.delete();
+    if (bestVideo != null) bestVideo.delete();
     if (busy) status = "Cancelled";
     busy = false;
     super.onDestroy();

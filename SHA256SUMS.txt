@@ -1,1 +1,1 @@
-08cb4d6b1c738a02a9aef3d1ca0bc12861eb876fc743622f48bd541476cb29f7  Compress-1.1.apk
+7ffb1c55dced7eef06a0964cd6cf0e36fcf7c5f4ed0dd75ad59d10e1fe665847  Compress-1.2.apk

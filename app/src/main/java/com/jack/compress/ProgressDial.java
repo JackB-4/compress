@@ -51,7 +51,7 @@ public final class ProgressDial extends View {
   @Override
   protected void onMeasure(int w, int h) {
     setMeasuredDimension(
-        MeasureSpec.getSize(w), (int) (248 * getResources().getDisplayMetrics().density));
+        MeasureSpec.getSize(w), (int) (192 * getResources().getDisplayMetrics().density));
   }
 
   @Override
