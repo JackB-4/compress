@@ -1,0 +1,67 @@
+<h1><img src="docs/compress-logo.svg" width="40" height="40" align="absmiddle" alt="Compress logo"> Compress</h1>
+
+A minimal native Android photo and video compressor. Set a maximum file size, add media, and save to the local media library. Android 10 and newer.
+
+<img src="docs/home.png" width="280" alt="Compress home screen in dark mode">
+
+## Install
+
+Download **Compress-1.1.apk** from the [latest release](https://github.com/JackB-4/compress/releases/latest), open it on Android, and allow installation from that source. Install over the previous Compress APK to keep settings. Package: `com.jack.compress`; versionName: `1.1`; versionCode: `2`.
+
+## Obtainium
+
+<a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fapp%2F%257B%2522id%2522%253A%2522com.jack.compress%2522%252C%2522url%2522%253A%2522https%253A%252F%252Fgithub.com%252FJackB-4%252Fcompress%2522%252C%2522author%2522%253A%2522JackB-4%2522%252C%2522name%2522%253A%2522Compress%2522%257D"><img src="docs/add-to-obtainium.svg" alt="Add Compress to Obtainium" width="176" height="40"></a>
+
+In [Obtainium](https://github.com/ImranR98/Obtainium), add:
+
+```
+https://github.com/JackB-4/compress
+```
+
+Use the normal GitHub stable-release defaults. Releases contain one universal APK. Future releases must increment versionCode and retain the package and signing certificate. No architecture filter or GitHub token is required for this public repository. Obtainium device installation has not been tested.
+
+## Features
+
+- Maximum size per file in decimal MB, with 5/10/25/50 MB presets.
+- Media picker, Android share-sheet input, URI drag/drop, and sequential queues.
+- Native Media3 video encoding to H.264 or HEVC/AAC MP4. Bitrate and resolution follow the size budget; oversized results are retried with lower settings.
+- JPEG/WebP photo quality search, followed by dimension reduction when required.
+- Files already below the limit can be copied without re-encoding.
+- Dark, light, and system themes; compact tiles and dial details inspired by [Meridian](https://github.com/JackB-4/meridian).
+- Frame-paced progress dial, converging arrows, smooth progress easing, completion checkmark, and screen transitions. Animations respect Android's system animation setting and stop when inactive.
+- Foreground processing and cancellation; originals are preserved. Every result is byte-checked before publication.
+
+## Saved files
+
+Outputs are published through MediaStore to `Pictures/Compress` and `Movies/Compress`. Google Photos can show them under **Collections → On this device → Compress**. Cloud backup follows your Photos folder settings.
+
+## Settings
+
+Theme, video codec, maximum video height, audio bitrate, audio removal, photo format, maximum photo edge, photo quality ceiling, and copying already-small files. Compression settings are intended to be changed between jobs.
+
+## Privacy and limits
+
+No network permission, ads, analytics, accounts, or uploads. Re-encoded photos omit source metadata and use SDR sRGB. Transparent images become white-backed JPEG unless WebP is selected; animated images become a still frame. Unchanged copies retain their original metadata.
+
+Input support depends on Android/Media3 decoders on the device. Common JPEG, PNG, WebP, HEIC, MP4, MOV, WebM, and supported MKV tracks are accepted; arbitrary codecs and camera RAW are not guaranteed. HEVC depends on the encoder. Very small video budgets may be unattainable, especially with audio enabled; the app reports failure and publishes no oversized output. Retries always start from the original input.
+
+Video percentages reflect the current encoder pass across the queue. Photo processing, size adjustment and saving are indeterminate. A retry may move progress backward. No device speed or perceptual-quality benchmark is claimed.
+
+## Build
+
+Windows PowerShell:
+
+```powershell
+./bootstrap.ps1
+./build.ps1
+```
+
+Bootstrap verifies SHA-256-pinned Microsoft JDK 17 and Android command-line tool downloads, then installs SDK/build tools 35. Review and accept Google's SDK license when prompted. The Gradle wrapper uses Gradle 8.11.1 with a pinned distribution checksum. Media3 is pinned to 1.8.0.
+
+Or open the project in Android Studio with JDK 17 and SDK 35. On Linux/macOS use `bash ./gradlew assembleRelease lintRelease` after configuring `ANDROID_HOME`. Output: `app/build/outputs/apk/release/app-release.apk`.
+
+Release builds are non-debuggable and retain this machine's original development signing identity for compatibility with the first APK. The private keystore is excluded from this repository. A build on another machine creates/uses that machine's development identity and cannot update the published installation. CI artifacts are independently signed development builds, not replacement release APKs. Keep the original local signing key for future published updates.
+
+## Validation
+
+See [TESTING.md](TESTING.md). Published releases include `SHA256SUMS.txt` for integrity verification. Physical Pixel 10 Pro throughput, visual quality, Photos indexing, and Obtainium installation still require device testing.
